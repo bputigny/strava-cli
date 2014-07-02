@@ -1,0 +1,5 @@
+.client-id
+.client-secret
+.strava-token
+Makefile
+dist/
