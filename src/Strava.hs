@@ -1,6 +1,8 @@
 module Strava (repl, initialStravaContext, getToken) where
 
 import System.Exit
+import System.Directory
+import System.Locale
 import System.IO.Error
 import System.IO
 import Network.Curl
@@ -10,6 +12,10 @@ import Control.Monad.State
 import Data.Functor
 import Control.Applicative
 import Data.Foldable        (traverse_)
+import Data.Time
+
+appName :: String
+appName = "strava-cli"
 
 stravaUserTokenFile :: String
 stravaUserTokenFile = ".strava-token"
@@ -56,7 +62,7 @@ data StravaActivity = StravaActivity
     , distance             :: Maybe Double
     , movingTime           :: Maybe Double
     , totalElevationGain   :: Maybe Double
-    , startDate            :: Maybe String
+    , startDate            :: Maybe UTCTime
     , elapsedTime          :: Maybe Double
     , averageHeartrate     :: Maybe Double
     , maxHeartrate         :: Maybe Double
@@ -70,12 +76,16 @@ instance JSON StravaActivity where
             queryObj "distance"             <*>
             queryObj "moving_time"          <*>
             queryObj "total_elevation_gain" <*>
-            queryObj "start_date"           <*>
+            queryTime "start_date"          <*>
             queryObj "elapsed_time"         <*>
             queryObj "average_heartrate"    <*>
             queryObj "max_heartrate"
-            where queryObj str = case valFromObj str o of
+            where
+                queryObj str = case valFromObj str o of
                     (Ok a) -> return $ Just a
+                    _      -> return Nothing
+                queryTime str = case valFromObj str o of
+                    (Ok a) -> return $ parseTime defaultTimeLocale "%FT%TZ" a
                     _      -> return Nothing
     readJSON _ = mzero
     showJSON = undefined
@@ -97,7 +107,7 @@ readStravaAppID = do
 
 authorize :: IO (Maybe StravaAuth)
 authorize = do
-    checkStravaApp <- tryIOError $ readStravaAppID
+    checkStravaApp <- tryIOError readStravaAppID
     (appId, secret) <- case checkStravaApp of
             Right c -> return c
             Left _ -> do
@@ -113,13 +123,13 @@ authorize = do
                 writeFile clientSecretFile s
                 return (i, s)
     let app = StravaApp appId secret
-    putStrLn $ "Visit: https://www.strava.com/oauth/authorize?client_id=" ++ (clientId app) ++ "&response_type=code&redirect_uri=http://putigny.net/strava&approval_prompt=force"
+    putStrLn $ "Visit: https://www.strava.com/oauth/authorize?client_id=" ++ clientId app ++ "&response_type=code&redirect_uri=http://putigny.net/strava&approval_prompt=force"
     putStrLn "and authorize this application to access your strava data"
     putStr "provide you code: "
     hFlush stdout
     code <- getLine
     (_, curlResp) <- curlGetString
-        ("https://www.strava.com/oauth/token?client_id=" ++ (clientId app) ++ "&client_secret=" ++ (clientSecret app) ++ "&code=" ++ code) [CurlPost True]
+        ("https://www.strava.com/oauth/token?client_id=" ++ clientId app ++ "&client_secret=" ++ clientSecret app ++ "&code=" ++ code) [CurlPost True]
     let stravaAuth = decode curlResp :: Result StravaAuth
     case stravaAuth of
             Ok a -> writeFile stravaUserTokenFile (accessToken a) >>
@@ -140,15 +150,17 @@ getToken = do
 
 printActivity :: StravaActivity -> IO ()
 printActivity a = do
-    printer $ show <$> athlete a
-    printer $ name a
-    printer $ (\x -> "  " ++ x ++ " km") <$> show <$> (round :: Double -> Int) <$> (/1000) <$> distance a
-    printer $ (\x -> "  " ++ x ++ " mD+") <$> show <$> (round :: Double -> Int) <$> totalElevationGain a
-    printer $ (\x -> "  HR: " ++ x ++ " (avg)") <$> show <$> (round :: Double -> Int) <$> averageHeartrate a
-    printer $ (\x -> "  HR: " ++ x ++ " (max)") <$> show <$> (round :: Double -> Int) <$> maxHeartrate a
+    ctz <- getCurrentTimeZone
+    printer $ (++ "\n") <$> show <$> athlete a
+    printer $ formatTime defaultTimeLocale "%F %T: " <$> utcToLocalTime ctz <$> startDate a
+    printer $ (\x -> "`" ++ x ++ "'\n") <$> name a
+    printer $ (\x -> "  " ++ x ++ " km\n") <$> show <$> (round :: Double -> Int) <$> (/1000) <$> distance a
+    printer $ (\x -> "  " ++ x ++ " mD+\n") <$> show <$> (round :: Double -> Int) <$> totalElevationGain a
+    printer $ (\x -> "  HR: " ++ x ++ " (avg)\n") <$> show <$> (round :: Double -> Int) <$> averageHeartrate a
+    printer $ (\x -> "  HR: " ++ x ++ " (max)\n") <$> show <$> (round :: Double -> Int) <$> maxHeartrate a
     putStr "\n"
     where
-        printer = traverse_ putStrLn
+        printer = traverse_ putStr
 
 lsStrava :: StravaContext ()
 lsStrava = do
